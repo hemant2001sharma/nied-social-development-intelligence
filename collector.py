@@ -300,14 +300,22 @@ def classify_sectors(title, description):
             scores[sector] = score
 
     # Explicit high-confidence rules
-    if "wash" in title_n or "hygiene" in title_n:
+    if (
+        "wash" in title_n
+        or "hygiene" in title_n
+        or "wateraid" in title_n
+        or "water and sanitation" in title_n
+    ):
         scores["WASH"] = scores.get("WASH", 0) + 8
 
     if "livelihood" in title_n:
         scores["Livelihoods"] = scores.get("Livelihoods", 0) + 8
 
-    if "entrepreneur" in title_n:
+    if "entrepreneur" in title_n or "enterprise" in title_n:
         scores["Entrepreneurship"] = scores.get("Entrepreneurship", 0) + 6
+
+    if "trade & livelihood" in title_n or "trade and livelihood" in title_n:
+        scores["Livelihoods"] = scores.get("Livelihoods", 0) + 8
 
     if "women" in title_n:
         scores["Women"] = scores.get("Women", 0) + 5
@@ -317,6 +325,9 @@ def classify_sectors(title, description):
 
     if "solar" in title_n or "renewable energy" in title_n or "dre" in title_n:
         scores["Renewable Energy"] = scores.get("Renewable Energy", 0) + 7
+
+    if "pmfme" in title_n or "enterprise" in title_n:
+        scores["Entrepreneurship"] = scores.get("Entrepreneurship", 0) + 3
 
     if "hospital" in title_n or "health worker" in title_n:
         scores["Health"] = scores.get("Health", 0) + 6
@@ -425,6 +436,8 @@ def classify_character(title, description):
     implementation_terms = [
         "implementation partner",
         "implementing partner",
+        "implementing partner ngos",
+        "empanelment of implementing partner",
         "programme implementation",
         "project implementation",
         "community mobilisation",
@@ -459,6 +472,9 @@ def classify_character(title, description):
     # Title-first classification prevents generic page text
     # from turning implementation work into procurement.
     if implementation_score >= 1:
+        return "Implementation / Partnership"
+
+    if "partnership" in title_n or "trade & livelihood partners" in title_n:
         return "Implementation / Partnership"
 
     if procurement_score >= 1:
@@ -497,18 +513,18 @@ def classify_character(title, description):
 # ============================================================
 
 MONTHS = {
-    "january": 1,
-    "february": 2,
-    "march": 3,
-    "april": 4,
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
     "may": 5,
-    "june": 6,
-    "july": 7,
-    "august": 8,
-    "september": 9,
-    "october": 10,
-    "november": 11,
-    "december": 12,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
 }
 
 
@@ -545,9 +561,20 @@ def parse_deadline(text):
     text = clean_text(text)
 
     patterns = [
+        # 16/09/2026, 16-09-2026
         r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b",
+
+        # 16 September 2026, 16th September 2026
         r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})\b",
+
+        # September 16 2026, September 16th, 2026
         r"\b([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b",
+
+        # 16 Sep 2026
+        r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3})\.?\s+(\d{4})\b",
+
+        # Sep 16, 2026
+        r"\b([A-Za-z]{3})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b",
     ]
 
     for pattern in patterns:
@@ -564,39 +591,60 @@ def parse_deadline(text):
 
 def extract_deadline(page_text):
     """
-    Look specifically around application/submission deadline language.
-    This prevents 'date of issue' or 'technical bid opening' from
-    being incorrectly selected as the application deadline.
+    Extract the application/submission deadline from NGOBox pages.
+
+    Priority:
+    1. Explicit application/submission labels
+    2. Common closing/deadline labels
+    3. Avoid unrelated dates such as posting dates
     """
 
     text = clean_text(page_text)
 
-    patterns = [
+    label_patterns = [
         r"(?:last date for submission|last date for apply|last date to apply|"
-        r"submission deadline|bid submission closing date|"
-        r"bid submission deadline|proposal submission deadline|"
-        r"closing date|apply by|applications close|"
-        r"submission last date)\s*[:\-]?\s*(.{0,180})",
-
-        r"(?:last date for submission|last date for apply|last date to apply|"
-        r"submission deadline|bid submission closing date|"
-        r"bid submission deadline|proposal submission deadline|"
-        r"closing date|apply by)\s+(.{0,180})",
+        r"last date of submission|last date of application|"
+        r"submission deadline|application deadline|proposal deadline|"
+        r"bid submission closing date|bid submission deadline|"
+        r"proposal submission deadline|closing date|apply by|"
+        r"applications close|submission last date|"
+        r"deadline for submission|deadline for application)"
+        r"\s*[:\-]?\s*(.{0,220})"
     ]
 
     candidates = []
 
-    for pattern in patterns:
+    for pattern in label_patterns:
         for match in re.finditer(pattern, text, flags=re.I):
             candidate = clean_text(match.group(1))
+
+            # Stop at obvious next-field labels.
+            candidate = re.split(
+                r"\s+(?:Description|About|Overview|Eligibility|Contact|"
+                r"Organisation|Organization|Posted By|How to Apply)\b",
+                candidate,
+                flags=re.I,
+            )[0]
+
             parsed = parse_deadline(candidate)
 
             if parsed:
                 candidates.append(parsed)
 
     if candidates:
-        # The first explicit application/submission deadline is preferred.
         return candidates[0]
+
+    # Fallback: inspect short windows around generic "deadline".
+    for match in re.finditer(
+        r"\bdeadline\b\s*[:\-]?\s*(.{0,180})",
+        text,
+        flags=re.I,
+    ):
+        candidate = clean_text(match.group(1))
+        parsed = parse_deadline(candidate)
+
+        if parsed:
+            return parsed
 
     return None
 
@@ -672,6 +720,12 @@ def strategic_score(
 
     if "women-led" in text or "women led" in text:
         score += 7
+
+    if "women micro-entrepreneurship" in text or "women micro entrepreneurship" in text:
+        score += 8
+
+    if "trade & livelihood" in text or "trade and livelihood" in text:
+        score += 6
 
     if "community capacity" in text or "capacity building" in text:
         score += 5
@@ -1187,7 +1241,7 @@ def build_record(parsed):
 def main():
     print("==============================================")
     print("NIED Social Development Intelligence Collector")
-    print("Version 1.3")
+    print("Version 1.4")
     print("==============================================")
 
     try:
@@ -1202,6 +1256,7 @@ def main():
         return
 
     written = 0
+    deadlines_found = 0
 
     for url in links:
         try:
@@ -1233,6 +1288,9 @@ def main():
             print(
                 f"  Sector: {intelligence['sector']}"
             )
+            if parsed["deadline"]:
+                deadlines_found += 1
+
             print(
                 f"  Deadline: {parsed['deadline'] or 'NOT FOUND'}"
             )
@@ -1261,7 +1319,8 @@ def main():
 
     print("\n==============================================")
     print(f"Supabase records written/updated: {written}")
-    print("Collector V1.3 completed.")
+    print(f"Deadlines found: {deadlines_found}/{len(links)}")
+    print("Collector V1.4 completed.")
     print("==============================================")
 
 
