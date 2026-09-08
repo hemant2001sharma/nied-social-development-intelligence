@@ -1,488 +1,1252 @@
 import os
 import re
 import hashlib
-from datetime import datetime, timezone
-from urllib.parse import urljoin
+from datetime import datetime, timezone, date
 
 import requests
 from bs4 import BeautifulSoup
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-HEADERS = {
-    "User-Agent": "NIED-SDI-Collector/1.1"
-}
-
 NGOBOX_LISTING = "https://www.ngobox.org/rfp_eoi_listing.php"
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0 Safari/537.36"
+    )
+}
 
-WATCH_TERMS = {
+TIMEOUT = 30
+
+
+# ============================================================
+# NIED STRATEGIC KEYWORDS
+# ============================================================
+
+SECTOR_RULES = {
     "Livelihoods": [
         "livelihood",
-        "employment",
-        "income generation"
+        "livelihoods",
+        "income generation",
+        "value chain",
+        "value chains",
+        "market linkage",
+        "market access",
+        "producer group",
+        "producer groups",
+        "enterprise development",
     ],
+
     "Entrepreneurship": [
+        "entrepreneurship",
         "entrepreneur",
-        "enterprise",
         "micro enterprise",
-        "startup"
+        "micro-enterprise",
+        "micro enterprise development",
+        "small enterprise",
+        "business development",
+        "enterprise development",
+        "women entrepreneur",
+        "women entrepreneurs",
     ],
-    "CSR": [
-        "csr",
-        "corporate social responsibility"
+
+    "Women": [
+        "women empowerment",
+        "women's empowerment",
+        "women empowerment",
+        "women entrepreneur",
+        "women entrepreneurs",
+        "women-led",
+        "women led",
+        "female entrepreneur",
+        "gender",
+        "gender equality",
     ],
+
     "Rural Development": [
         "rural development",
-        "village",
-        "rural"
+        "rural communities",
+        "rural livelihood",
+        "rural livelihoods",
+        "village development",
+        "community development",
+        "farmer",
+        "farmers",
+        "agriculture",
+        "agricultural",
+        "agrarian",
     ],
-    "Women": [
-        "women",
-        "female",
-        "girls",
-        "gender"
-    ],
+
     "Skills": [
         "skill development",
-        "skilling",
-        "vocational",
-        "training"
+        "skills development",
+        "vocational training",
+        "vocational education",
+        "capacity building",
+        "capacity-building",
+        "training programme",
+        "training program",
+        "workforce development",
+        "employability",
+        "employment generation",
     ],
+
     "Climate": [
-        "climate",
         "climate resilience",
-        "renewable",
-        "solar",
-        "adaptation"
+        "climate-resilient",
+        "climate resilient",
+        "climate adaptation",
+        "climate change",
+        "resilient livelihood",
+        "resilient livelihoods",
+        "natural resource management",
+        "disaster resilience",
     ],
-    "Water": [
+
+    "Renewable Energy": [
+        "solar energy",
+        "solar panel",
+        "solar panels",
+        "solar street light",
+        "solar street lights",
+        "renewable energy",
+        "clean energy",
+        "energy access",
+        "solar power",
+    ],
+
+    "WASH": [
         "wash",
-        "water",
+        "water sanitation",
+        "water, sanitation",
         "sanitation",
-        "rainwater"
+        "hygiene",
+        "drinking water",
+        "water supply",
+        "community water",
     ],
+
     "Health": [
         "health",
+        "healthcare",
+        "public health",
+        "maternal health",
+        "child health",
+        "frontline health worker",
+        "health worker",
         "nutrition",
-        "hospital"
     ],
+
     "Education": [
         "education",
-        "school",
-        "learning",
-        "career guidance"
+        "school education",
+        "learning outcomes",
+        "teacher training",
+        "student learning",
+        "literacy",
+        "digital learning",
     ],
+
     "Environment": [
         "environment",
+        "environmental sustainability",
         "biodiversity",
-        "sustainability",
-        "natural resource"
+        "conservation",
+        "ecosystem",
+        "waste management",
+        "circular economy",
     ],
+
     "Research": [
+        "research study",
         "research",
-        "study",
         "assessment",
+        "impact assessment",
         "evaluation",
-        "m&e",
-        "impact assessment"
+        "baseline study",
+        "endline study",
+        "knowledge mapping",
+        "learning study",
+        "consultancy study",
+    ],
+
+    "CSR": [
+        "csr",
+        "corporate social responsibility",
+        "corporate philanthropy",
+        "philanthropy",
+        "foundation",
+        "social investment",
     ],
 }
 
 
-def clean(text):
-    return re.sub(r"\s+", " ", text or "").strip()
+# ============================================================
+# STRATEGIC WEIGHTS
+# ============================================================
+
+STRATEGIC_WEIGHTS = {
+    "Livelihoods": 20,
+    "Entrepreneurship": 20,
+    "Women": 15,
+    "Rural Development": 15,
+    "Skills": 10,
+    "Climate": 15,
+    "Research": 10,
+    "CSR": 10,
+    "WASH": 5,
+    "Health": 5,
+    "Education": 5,
+    "Environment": 5,
+    "Renewable Energy": 5,
+}
 
 
-def fingerprint(title, organisation=""):
-    raw = f"{clean(title).lower()}|{clean(organisation).lower()}"
-    return hashlib.sha256(
-        raw.encode("utf-8")
-    ).hexdigest()
+# ============================================================
+# HELPERS
+# ============================================================
+
+def clean_text(value):
+    if not value:
+        return ""
+
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 
-def classify(title, description):
-    text = f"{title} {description}".lower()
-
-    if any(x in text for x in [
-        "rfp",
-        "eoi",
-        "request for proposal",
-        "tender",
-        "consultancy",
-        "expression of interest",
-        "terms of reference",
-        "tor"
-    ]):
-        return "OPPORTUNITY"
-
-    if any(x in text for x in [
-        "project",
-        "programme",
-        "initiative"
-    ]):
-        return "PROJECT"
-
-    if any(x in text for x in [
-        "model",
-        "innovation",
-        "scalable"
-    ]):
-        return "MODEL"
-
-    if any(x in text for x in [
-        "grant",
-        "funding",
-        "philanthropy"
-    ]):
-        return "FUNDING"
-
-    if any(x in text for x in [
-        "policy",
-        "guideline",
-        "notification",
-        "scheme"
-    ]):
-        return "POLICY"
-
-    if any(x in text for x in [
-        "report",
-        "assessment",
-        "study"
-    ]):
-        return "REPORT"
-
-    return "NEWS"
+def make_fingerprint(title, organisation=""):
+    raw = f"{title.lower().strip()}|{organisation.lower().strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def sectors(text):
-    t = text.lower()
+def get_soup(url):
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=TIMEOUT,
+    )
+    response.raise_for_status()
 
-    return [
-        name
-        for name, terms in WATCH_TERMS.items()
-        if any(term in t for term in terms)
+    return BeautifulSoup(response.text, "html.parser")
+
+
+def normalise(text):
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+# ============================================================
+# SECTOR CLASSIFICATION
+# ============================================================
+
+def classify_sectors(title, description):
+    """
+    Return sectors ordered by relevance.
+
+    Important:
+    We do NOT tag every generic word found on the page.
+    Only meaningful keyword matches are counted.
+    """
+
+    text = normalise(f"{title} {description}")
+
+    scores = {}
+
+    for sector, keywords in SECTOR_RULES.items():
+        score = 0
+
+        for keyword in keywords:
+            keyword = keyword.lower()
+
+            if keyword in text:
+                # Exact strategic phrases receive more weight.
+                if len(keyword.split()) >= 2:
+                    score += 3
+                else:
+                    score += 1
+
+        if score > 0:
+            scores[sector] = score
+
+    ordered = sorted(
+        scores.items(),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    # Keep only meaningful sectors.
+    selected = [sector for sector, score in ordered if score >= 2]
+
+    # Maximum 4 sectors.
+    selected = selected[:4]
+
+    return selected
+
+
+# ============================================================
+# OPPORTUNITY TYPE
+# ============================================================
+
+def classify_opportunity_type(title, description):
+    text = normalise(f"{title} {description}")
+
+    if "expression of interest" in text or re.search(r"\beoi\b", text):
+        return "EOI"
+
+    if "request for proposal" in text or re.search(r"\brfp\b", text):
+        return "RFP"
+
+    if "terms of reference" in text or re.search(r"\btor\b", text):
+        return "Consultancy / ToR"
+
+    if "tender" in text or "e-tender" in text:
+        return "Tender"
+
+    if "grant" in text:
+        return "Grant"
+
+    if "partnership" in text:
+        return "Partnership"
+
+    if "consultancy" in text:
+        return "Consultancy"
+
+    return "Opportunity"
+
+
+# ============================================================
+# OPPORTUNITY CHARACTER
+# ============================================================
+
+def classify_character(title, description):
+    """
+    Distinguish strategic/knowledge opportunities from
+    procurement/supply-heavy opportunities.
+    """
+
+    text = normalise(f"{title} {description}")
+
+    procurement_terms = [
+        "procurement",
+        "supply",
+        "installation",
+        "commissioning",
+        "fabrication",
+        "supplier",
+        "vendor",
+        "equipment",
+        "materials",
+        "construction",
     ]
 
+    implementation_terms = [
+        "implementation partner",
+        "implementing partner",
+        "programme implementation",
+        "project implementation",
+        "community mobilisation",
+        "capacity building",
+        "livelihood strengthening",
+        "enterprise development",
+    ]
 
-def extract_deadline(text):
+    research_terms = [
+        "research",
+        "assessment",
+        "evaluation",
+        "study",
+        "knowledge mapping",
+        "consultancy",
+    ]
+
+    procurement_score = sum(
+        1 for term in procurement_terms if term in text
+    )
+
+    implementation_score = sum(
+        1 for term in implementation_terms if term in text
+    )
+
+    research_score = sum(
+        1 for term in research_terms if term in text
+    )
+
+    if procurement_score >= 3 and procurement_score > implementation_score:
+        return "Procurement / Supply"
+
+    if implementation_score >= 1:
+        return "Implementation / Partnership"
+
+    if research_score >= 1:
+        return "Research / Consultancy"
+
+    return "General Opportunity"
+
+
+# ============================================================
+# DEADLINE PARSING
+# ============================================================
+
+MONTHS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+
+
+def parse_deadline(text):
+    if not text:
+        return None
+
+    text = clean_text(text)
+
     patterns = [
-        r"Apply By:\s*(\d{1,2}\s+[A-Za-z]{3,9}\.?\s+2026)",
-        r"Deadline:\s*(\d{1,2}\s+[A-Za-z]{3,9}\.?\s+2026)",
-        r"Last Date[^:]*:\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9}\.?\s+2026)",
-        r"Submission Deadline[^:]*:\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9}\.?\s+2026)",
+        r"(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})",
+        r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
+        r"([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})",
     ]
 
     for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-            flags=re.I
-        )
+        match = re.search(pattern, text)
 
         if not match:
             continue
 
-        value = re.sub(
-            r"(\d{1,2})(st|nd|rd|th)",
-            r"\1",
-            match.group(1)
-        )
+        try:
+            groups = match.groups()
 
-        value = value.replace(".", "")
+            if pattern.startswith(r"(\d"):
+                day = int(groups[0])
+                month = groups[1]
+                year = int(groups[2])
 
-        for fmt in ("%d %b %Y", "%d %B %Y"):
-            try:
-                return datetime.strptime(
-                    value,
-                    fmt
-                ).date().isoformat()
-            except ValueError:
-                pass
+                if month.isdigit():
+                    month_num = int(month)
+                else:
+                    month_num = MONTHS.get(month.lower())
+
+            else:
+                month_num = MONTHS.get(groups[0].lower())
+                day = int(groups[1])
+                year = int(groups[2])
+
+            if not month_num:
+                continue
+
+            parsed = date(year, month_num, day)
+
+            return parsed.isoformat()
+
+        except (ValueError, TypeError):
+            continue
 
     return None
 
 
-def extract_organisation(text):
-    match = re.search(
-        r"Organization:\s*(.+?)(?:\s+Apply By:|\s+About the Organization|\s+About the|$)",
-        text,
-        flags=re.I
+# ============================================================
+# URGENCY
+# ============================================================
+
+def urgency_score(deadline):
+    """
+    Score based on days remaining.
+
+    95 = <= 3 days
+    85 = 4-7 days
+    70 = 8-14 days
+    55 = 15-30 days
+    35 = 31-60 days
+    20 = >60 days
+    """
+
+    if not deadline:
+        return 25
+
+    try:
+        deadline_date = datetime.strptime(
+            deadline,
+            "%Y-%m-%d",
+        ).date()
+
+        today = datetime.now(timezone.utc).date()
+        days = (deadline_date - today).days
+
+        if days < 0:
+            return 0
+
+        if days <= 3:
+            return 95
+
+        if days <= 7:
+            return 85
+
+        if days <= 14:
+            return 70
+
+        if days <= 30:
+            return 55
+
+        if days <= 60:
+            return 35
+
+        return 20
+
+    except Exception:
+        return 25
+
+
+# ============================================================
+# STRATEGIC SCORE
+# ============================================================
+
+def strategic_score(sectors, character, opportunity_type, title, description):
+    score = 0
+
+    for sector in sectors:
+        score += STRATEGIC_WEIGHTS.get(sector, 0)
+
+    text = normalise(f"{title} {description}")
+
+    # Strong strategic signals
+    if "implementation partner" in text:
+        score += 10
+
+    if "livelihood strengthening" in text:
+        score += 8
+
+    if "enterprise development" in text:
+        score += 8
+
+    if "women entrepreneur" in text or "women entrepreneurs" in text:
+        score += 7
+
+    if "community capacity" in text or "capacity building" in text:
+        score += 5
+
+    # Research/consultancy is useful, but not automatically
+    # more strategic than direct programme opportunities.
+    if character == "Research / Consultancy":
+        score += 3
+
+    # Procurement-only opportunities generally have lower
+    # strategic relevance to NIED.
+    if character == "Procurement / Supply":
+        score -= 20
+
+    # Generic tenders should not dominate the dashboard.
+    if opportunity_type == "Tender":
+        score -= 5
+
+    return max(0, min(100, score))
+
+
+# ============================================================
+# OPPORTUNITY SCORE
+# ============================================================
+
+def opportunity_score(
+    strategic,
+    urgency,
+    character,
+    opportunity_type,
+    title,
+    description,
+):
+    """
+    Measures how worthwhile the opportunity is for NIED.
+
+    Strategic fit is the main driver.
+    Urgency matters, but an urgent bad-fit opportunity
+    should not suddenly become a top opportunity.
+    """
+
+    score = (
+        strategic * 0.60
+        + urgency * 0.20
     )
 
-    return clean(match.group(1)) if match else ""
+    if character == "Implementation / Partnership":
+        score += 15
+
+    elif character == "Research / Consultancy":
+        score += 8
+
+    elif character == "Procurement / Supply":
+        score -= 20
+
+    if opportunity_type in ["RFP", "EOI", "Partnership"]:
+        score += 5
+
+    if opportunity_type == "Tender":
+        score -= 5
+
+    text = normalise(f"{title} {description}")
+
+    # Strong NIED-oriented signals
+    if "livelihood" in text:
+        score += 5
+
+    if "entrepreneur" in text:
+        score += 5
+
+    if "women" in text:
+        score += 3
+
+    if "rural" in text:
+        score += 3
+
+    return max(0, min(100, round(score)))
 
 
-def priority(item_type, sector_list, deadline):
-    if item_type != "OPPORTUNITY":
-        return "MEDIUM"
+# ============================================================
+# RELEVANCE REASON
+# ============================================================
 
-    strong = {
-        "Livelihoods",
-        "Entrepreneurship",
-        "Skills",
-        "Women",
-        "Rural Development",
-        "Climate",
-        "Research"
-    }
+def relevance_reason(
+    sectors,
+    character,
+    strategic,
+):
+    if not sectors:
+        return "Limited direct alignment identified from available information."
 
-    if strong.intersection(sector_list):
+    primary = sectors[:3]
+
+    sector_text = ", ".join(primary)
+
+    if character == "Implementation / Partnership":
+        return (
+            f"Strong potential alignment with NIED work in "
+            f"{sector_text}, particularly through implementation "
+            f"or partnership engagement."
+        )
+
+    if character == "Research / Consultancy":
+        return (
+            f"Relevant to NIED capabilities in "
+            f"{sector_text}, with potential for research, "
+            f"assessment, knowledge or consultancy engagement."
+        )
+
+    if character == "Procurement / Supply":
+        return (
+            f"Related to {sector_text}, but the opportunity appears "
+            f"primarily procurement or supply oriented, reducing "
+            f"direct strategic relevance to NIED."
+        )
+
+    if strategic >= 70:
+        return (
+            f"Strong alignment with NIED priorities across "
+            f"{sector_text}."
+        )
+
+    if strategic >= 45:
+        return (
+            f"Moderate alignment with NIED priorities across "
+            f"{sector_text}."
+        )
+
+    return (
+        f"Some relevance to NIED through {sector_text}, "
+        f"but strategic fit appears limited."
+    )
+
+
+# ============================================================
+# CAPABILITY MATCH
+# ============================================================
+
+def capability_match(sectors, character, title, description):
+    matches = []
+
+    text = normalise(f"{title} {description}")
+
+    if any(
+        sector in sectors
+        for sector in [
+            "Livelihoods",
+            "Entrepreneurship",
+            "Rural Development",
+        ]
+    ):
+        matches.append("Livelihood and enterprise development")
+
+    if "Women" in sectors:
+        matches.append("Women-focused development")
+
+    if "Skills" in sectors:
+        matches.append("Training and capacity building")
+
+    if "Climate" in sectors:
+        matches.append("Climate-resilient development")
+
+    if "Research" in sectors or character == "Research / Consultancy":
+        matches.append("Research, assessment and knowledge work")
+
+    if "CSR" in sectors:
+        matches.append("CSR / corporate partnership engagement")
+
+    if "WASH" in sectors:
+        matches.append("WASH programme experience")
+
+    if "Health" in sectors:
+        matches.append("Health programme experience")
+
+    if "Education" in sectors:
+        matches.append("Education programme experience")
+
+    if "Renewable Energy" in sectors:
+        matches.append("Renewable-energy development context")
+
+    if not matches:
+        return "No strong capability match identified."
+
+    return "; ".join(matches[:4])
+
+
+# ============================================================
+# CAPABILITY GAP
+# ============================================================
+
+def capability_gap(
+    sectors,
+    character,
+    opportunity_type,
+    title,
+    description,
+):
+    text = normalise(f"{title} {description}")
+
+    gaps = []
+
+    if character == "Procurement / Supply":
+        gaps.append(
+            "Primarily procurement/supply oriented rather than "
+            "a core programme-development opportunity"
+        )
+
+    if "construction" in text:
+        gaps.append("Construction/vendor capability may be required")
+
+    if "solar" in text and "Renewable Energy" in sectors:
+        gaps.append("Specialised technical renewable-energy capability")
+
+    if "hospital" in text:
+        gaps.append("Specialised infrastructure/health facility capability")
+
+    if "digital communication" in text:
+        gaps.append("Specialised communications/digital execution capability")
+
+    if "website development" in text:
+        gaps.append("Specialised web development capability")
+
+    if "research" in text or "assessment" in text:
+        gaps.append(
+            "Confirm availability of required research/technical specialists"
+        )
+
+    if not gaps:
+        return "No major capability gap identified from available information."
+
+    return "; ".join(gaps[:3])
+
+
+# ============================================================
+# RECOMMENDED ACTION
+# ============================================================
+
+def recommended_action(
+    priority,
+    strategic,
+    opportunity,
+    character,
+):
+    if character == "Procurement / Supply":
+        if strategic >= 45:
+            return "Review only if NIED has a suitable technical/vendor partner."
+        return "Monitor; low priority for direct NIED pursuit."
+
+    if priority == "URGENT":
+        return "Immediate eligibility review and decision on pursuit."
+
+    if priority == "HIGH":
+        return "Conduct detailed eligibility and capability review."
+
+    if priority == "MEDIUM":
+        return "Track opportunity and assess potential fit."
+
+    return "Monitor for strategic relevance."
+
+
+# ============================================================
+# PRIORITY
+# ============================================================
+
+def priority_level(strategic, opportunity, urgency):
+    """
+    Priority combines fit + opportunity value + deadline urgency.
+
+    Crucially, urgency is considered first so that a strong
+    opportunity closing in 2 days can become URGENT.
+    """
+
+    if (
+        strategic >= 70
+        and opportunity >= 70
+        and urgency >= 85
+    ):
+        return "URGENT"
+
+    if (
+        opportunity >= 65
+        or (
+            strategic >= 70
+            and urgency >= 70
+        )
+    ):
         return "HIGH"
 
-    if deadline:
-        try:
-            days = (
-                datetime.fromisoformat(deadline).date()
-                - datetime.now().date()
-            ).days
+    if opportunity >= 45 or strategic >= 45:
+        return "MEDIUM"
 
-            if days <= 3:
-                return "URGENT"
-
-        except ValueError:
-            pass
-
-    return "MEDIUM"
+    return "LOW"
 
 
-def fetch(url):
-    response = requests.get(
-        url,
-        headers=HEADERS,
-        timeout=40
+# ============================================================
+# FULL INTELLIGENCE ANALYSIS
+# ============================================================
+
+def analyse_item(
+    title,
+    description,
+    organisation,
+    deadline,
+):
+    sectors = classify_sectors(
+        title,
+        description,
     )
 
-    response.raise_for_status()
-
-    return response.text
-
-
-def extract_listing_links(html):
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
+    opportunity_type = classify_opportunity_type(
+        title,
+        description,
     )
 
-    found = []
-    seen = set()
+    character = classify_character(
+        title,
+        description,
+    )
 
-    for a in soup.find_all(
-        "a",
-        href=True
-    ):
-        href = urljoin(
-            NGOBOX_LISTING,
-            a["href"]
-        )
+    urgency = urgency_score(deadline)
+
+    strategic = strategic_score(
+        sectors,
+        character,
+        opportunity_type,
+        title,
+        description,
+    )
+
+    opportunity = opportunity_score(
+        strategic,
+        urgency,
+        character,
+        opportunity_type,
+        title,
+        description,
+    )
+
+    priority = priority_level(
+        strategic,
+        opportunity,
+        urgency,
+    )
+
+    reason = relevance_reason(
+        sectors,
+        character,
+        strategic,
+    )
+
+    match = capability_match(
+        sectors,
+        character,
+        title,
+        description,
+    )
+
+    gap = capability_gap(
+        sectors,
+        character,
+        opportunity_type,
+        title,
+        description,
+    )
+
+    action = recommended_action(
+        priority,
+        strategic,
+        opportunity,
+        character,
+    )
+
+    return {
+        "sector": ", ".join(sectors) if sectors else "Other",
+        "opportunity_type": opportunity_type,
+        "strategic_score": strategic,
+        "opportunity_score": opportunity,
+        "urgency_score": urgency,
+        "priority": priority,
+        "relevance_reason": reason,
+        "capability_match": match,
+        "capability_gap": gap,
+        "recommended_action": action,
+    }
+
+
+# ============================================================
+# NGOBOX LISTING
+# ============================================================
+
+def get_ngobox_links():
+    soup = get_soup(NGOBOX_LISTING)
+
+    links = []
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
 
         if "full_rfp_eoi_" not in href:
             continue
 
-        title = clean(
-            a.get_text(
-                " ",
-                strip=True
-            )
-        )
+        if href.startswith("//"):
+            href = "https:" + href
 
-        if len(title) < 15:
-            continue
+        elif href.startswith("/"):
+            href = "https://www.ngobox.org" + href
 
-        if href in seen:
-            continue
+        elif not href.startswith("http"):
+            href = "https://www.ngobox.org/" + href.lstrip("/")
 
-        seen.add(href)
+        if href not in links:
+            links.append(href)
 
-        found.append(
-            (title, href)
-        )
-
-    return found[:60]
+    return links
 
 
-def parse_detail(url, fallback_title):
-    html = fetch(url)
+# ============================================================
+# NGOBOX DETAIL PARSER
+# ============================================================
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
+def parse_ngobox_detail(url):
+    soup = get_soup(url)
+
+    page_text = clean_text(
+        soup.get_text(" ", strip=True)
     )
 
-    text = clean(
-        soup.get_text(
+    title = ""
+
+    # Try page heading first.
+    for tag in soup.find_all(
+        ["h1", "h2", "h3"]
+    ):
+        text = clean_text(tag.get_text(" ", strip=True))
+
+        if (
+            text
+            and len(text) > 10
+            and "NGOBOX" not in text.upper()
+        ):
+            title = text
+            break
+
+    # Fallback to title tag.
+    if not title and soup.title:
+        title = clean_text(
+            soup.title.get_text(" ", strip=True)
+        )
+
+    organisation = ""
+
+    organisation_patterns = [
+        r"Organisation\s*[:\-]\s*(.*?)(?=\s+(?:Deadline|Last Date|Closing Date)\b)",
+        r"Organization\s*[:\-]\s*(.*?)(?=\s+(?:Deadline|Last Date|Closing Date)\b)",
+        r"Posted By\s*[:\-]\s*(.*?)(?=\s+(?:Deadline|Last Date|Closing Date)\b)",
+    ]
+
+    for pattern in organisation_patterns:
+        match = re.search(
+            pattern,
+            page_text,
+            flags=re.I,
+        )
+
+        if match:
+            organisation = clean_text(match.group(1))
+            break
+
+    deadline_text = ""
+
+    deadline_patterns = [
+        r"Deadline\s*[:\-]\s*(.*?)(?=\s+(?:Description|About|Overview|Eligibility|Contact)\b)",
+        r"Last Date\s*[:\-]\s*(.*?)(?=\s+(?:Description|About|Overview|Eligibility|Contact)\b)",
+        r"Closing Date\s*[:\-]\s*(.*?)(?=\s+(?:Description|About|Overview|Eligibility|Contact)\b)",
+    ]
+
+    for pattern in deadline_patterns:
+        match = re.search(
+            pattern,
+            page_text,
+            flags=re.I,
+        )
+
+        if match:
+            deadline_text = clean_text(match.group(1))
+            break
+
+    deadline = parse_deadline(
+        deadline_text
+    )
+
+    # Remove obvious page-navigation noise.
+    description = page_text
+
+    noise_patterns = [
+        r"Home\s+RFP\s*/\s*EOI.*?(?=RFP|EOI|ToR|Tender)",
+        r"Share this opportunity.*",
+        r"Login.*",
+        r"Register.*",
+    ]
+
+    for pattern in noise_patterns:
+        description = re.sub(
+            pattern,
             " ",
-            strip=True
+            description,
+            flags=re.I,
         )
-    )
 
-    h1 = soup.find("h1")
+    description = clean_text(description)
 
-    title = (
-        clean(h1.get_text(
-            " ",
-            strip=True
-        ))
-        if h1
-        else fallback_title
-    )
-
-    organisation = extract_organisation(text)
-
-    deadline = extract_deadline(text)
-
-    description = text[:2500]
+    # Avoid storing enormous pages.
+    if len(description) > 6000:
+        description = description[:6000]
 
     return {
         "title": title[:500],
-        "description": description,
         "organisation": organisation[:300],
         "deadline": deadline,
-        "source_name": "NGOBox RFP / EOI",
+        "description": description,
         "source_url": url,
     }
 
 
-def upsert(items):
-    endpoint = f"{SUPABASE_URL}/rest/v1/items"
+# ============================================================
+# SUPABASE
+# ============================================================
 
-    headers = {
+def supabase_headers():
+    return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Authorization": (
+            f"Bearer {SUPABASE_SERVICE_ROLE_KEY}"
+        ),
         "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates,return=minimal",
+        "Prefer": "resolution=merge-duplicates",
     }
+
+
+def supabase_upsert(item):
+    url = (
+        f"{SUPABASE_URL}/rest/v1/items"
+        "?on_conflict=fingerprint"
+    )
+
+    response = requests.post(
+        url,
+        headers=supabase_headers(),
+        json=item,
+        timeout=TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+
+# ============================================================
+# BUILD DATABASE RECORD
+# ============================================================
+
+def build_record(parsed):
+    title = parsed["title"]
+    organisation = parsed["organisation"]
+    description = parsed["description"]
+    deadline = parsed["deadline"]
+
+    intelligence = analyse_item(
+        title=title,
+        description=description,
+        organisation=organisation,
+        deadline=deadline,
+    )
+
+    fingerprint = make_fingerprint(
+        title,
+        organisation,
+    )
+
+    now = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    record = {
+        "fingerprint": fingerprint,
+        "item_type": "OPPORTUNITY",
+        "title": title,
+        "description": description,
+        "organisation": organisation,
+        "sector": intelligence["sector"],
+        "geography": "India",
+        "opportunity_type": intelligence["opportunity_type"],
+        "deadline": deadline,
+        "source_id": None,
+        "source_name": "NGOBox",
+        "source_url": parsed["source_url"],
+        "published_at": None,
+        "fetched_at": now,
+        "priority": intelligence["priority"],
+        "opportunity_score": intelligence["opportunity_score"],
+        "strategic_score": intelligence["strategic_score"],
+        "urgency_score": intelligence["urgency_score"],
+        "relevance_reason": intelligence["relevance_reason"],
+        "capability_match": intelligence["capability_match"],
+        "capability_gap": intelligence["capability_gap"],
+        "recommended_action": intelligence["recommended_action"],
+        "is_watchlisted": False,
+        "is_verified": False,
+        "updated_at": now,
+    }
+
+    return record
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    print("==============================================")
+    print("NIED Social Development Intelligence Collector")
+    print("Version 1.2")
+    print("==============================================")
+
+    try:
+        links = get_ngobox_links()
+
+        print(
+            f"\nListing records found: {len(links)}"
+        )
+
+    except Exception as e:
+        print(
+            f"NGOBox listing failed: {e}"
+        )
+        return
 
     written = 0
 
-    for item in items:
+    for url in links:
+        try:
+            parsed = parse_ngobox_detail(
+                url
+            )
 
-        combined = (
-            f'{item["title"]} '
-            f'{item["description"]}'
-        )
+            if not parsed["title"]:
+                print(
+                    f"Skipped: no title found | {url}"
+                )
+                continue
 
-        item_type = classify(
-            item["title"],
-            item["description"]
-        )
+            intelligence = analyse_item(
+                parsed["title"],
+                parsed["description"],
+                parsed["organisation"],
+                parsed["deadline"],
+            )
 
-        sec = sectors(combined)
+            print(
+                f"\nParsed: {parsed['title'][:100]}"
+            )
 
-        fp = fingerprint(
-            item["title"],
-            item["organisation"]
-        )
+            print(
+                f"  Sector: {intelligence['sector']}"
+            )
 
-        data = {
-            "fingerprint": fp,
-            "item_type": item_type,
-            "title": item["title"],
-            "description": item["description"],
-            "organisation": item["organisation"],
-            "sector": sec,
-            "geography": ["India"],
-            "opportunity_type": (
-                item_type
-                if item_type == "OPPORTUNITY"
-                else None
-            ),
-            "deadline": item["deadline"],
-            "source_name": item["source_name"],
-            "source_url": item["source_url"],
-            "priority": priority(
-                item_type,
-                sec,
-                item["deadline"]
-            ),
-            "fetched_at": datetime.now(
-                timezone.utc
-            ).isoformat(),
-            "is_verified": False,
-        }
+            print(
+                f"  Strategic: "
+                f"{intelligence['strategic_score']}"
+            )
 
-        response = requests.post(
-            endpoint,
-            headers=headers,
-            json=data,
-            timeout=30
-        )
+            print(
+                f"  Opportunity: "
+                f"{intelligence['opportunity_score']}"
+            )
 
-        if response.status_code in (
-            200,
-            201,
-            204
-        ):
+            print(
+                f"  Urgency: "
+                f"{intelligence['urgency_score']}"
+            )
+
+            print(
+                f"  Priority: "
+                f"{intelligence['priority']}"
+            )
+
+            record = build_record(
+                parsed
+            )
+
+            supabase_upsert(
+                record
+            )
+
             written += 1
 
-        else:
+        except Exception as e:
             print(
-                "Supabase write error:",
-                response.status_code,
-                response.text[:500]
+                f"Detail failed: {url}"
             )
-
-    return written
-
-
-def main():
-
-    print(
-        "Fetching:",
-        NGOBOX_LISTING
-    )
-
-    listing_html = fetch(
-        NGOBOX_LISTING
-    )
-
-    links = extract_listing_links(
-        listing_html
-    )
-
-    print(
-        "Listing records found:",
-        len(links)
-    )
-
-    items = []
-
-    for fallback_title, url in links:
-
-        try:
-
-            item = parse_detail(
-                url,
-                fallback_title
-            )
-
-            items.append(item)
-
             print(
-                "Parsed:",
-                item["title"][:100]
-            )
-
-        except Exception as exc:
-
-            print(
-                "Detail failed:",
-                url,
-                exc
+                f"Reason: {e}"
             )
 
     print(
-        "Parsed detail records:",
-        len(items)
+        "\n=============================================="
     )
 
-    written = upsert(items)
+    print(
+        f"Supabase records written/updated: {written}"
+    )
 
     print(
-        "Supabase records written/updated:",
-        written
+        "Collector V1.2 completed."
     )
 
 
