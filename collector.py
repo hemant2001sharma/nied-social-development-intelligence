@@ -16,6 +16,8 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
 NGOBOX_LISTING = "https://www.ngobox.org/rfp_eoi_listing.php"
 
+ONE_PURPOS_RFP_API = "https://onepurpos.in/api/user/get-all-rfps-grants"
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1055,6 +1057,97 @@ def get_ngobox_links():
 
 
 # ============================================================
+# ONE PURPOS RFP API
+# ============================================================
+
+def get_one_purpos_rfps():
+    response = requests.get(
+        ONE_PURPOS_RFP_API,
+        params={
+            "page": 1,
+            "limit": 50,
+        },
+        headers=HEADERS,
+        timeout=TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+    records = data.get("data", [])
+
+    if not isinstance(records, list):
+        raise ValueError("Unexpected One Purpos API response format.")
+
+    return records
+
+
+def parse_one_purpos_rfp(record):
+    title = clean_text(record.get("rfpTitle", ""))
+    organisation = clean_text(record.get("organization", ""))
+    description = clean_text(record.get("description", ""))
+    slug = clean_text(record.get("slug", ""))
+
+    application_deadline = clean_text(
+        str(record.get("applicationDeadline", "") or "")
+    )
+
+    deadline = None
+
+    if application_deadline:
+        deadline = parse_deadline(application_deadline)
+
+        # Handle ISO timestamps such as 2026-09-18T18:30:00.000Z.
+        if not deadline:
+            iso_match = re.search(
+                r"(20\\d{2})-(\\d{1,2})-(\\d{1,2})",
+                application_deadline,
+            )
+            if iso_match:
+                try:
+                    deadline = date(
+                        int(iso_match.group(1)),
+                        int(iso_match.group(2)),
+                        int(iso_match.group(3)),
+                    ).isoformat()
+                except ValueError:
+                    deadline = None
+
+    if slug:
+        source_url = f"https://onepurpos.in/openings/rfps/{slug}"
+    else:
+        source_url = ONE_PURPOS_RFP_API
+
+    geography = record.get("locations") or ["India"]
+
+    if isinstance(geography, str):
+        geography = [clean_text(geography)] if clean_text(geography) else ["India"]
+    elif not isinstance(geography, list):
+        geography = ["India"]
+
+    geography = [
+        clean_text(str(location))
+        for location in geography
+        if clean_text(str(location))
+    ]
+
+    if not geography:
+        geography = ["India"]
+
+    return {
+        "title": title[:500],
+        "organisation": organisation[:300],
+        "deadline": deadline,
+        "description": description[:6000],
+        "source_url": source_url,
+        "source_name": "One Purpos",
+        "source_id": None,
+        "geography": geography[:20],
+        "published_at": None,
+    }
+
+
+# ============================================================
 # NGOBOX DETAIL PARSER
 # ============================================================
 
@@ -1210,13 +1303,13 @@ def build_record(parsed):
         "description": description,
         "organisation": organisation,
         "sector": intelligence["sectors"],
-        "geography": ["India"],
+        "geography": parsed.get("geography", ["India"]),
         "opportunity_type": intelligence["opportunity_type"],
         "deadline": deadline,
-        "source_id": None,
-        "source_name": "NGOBox",
+        "source_id": parsed.get("source_id"),
+        "source_name": parsed.get("source_name", "NGOBox"),
         "source_url": parsed["source_url"],
-        "published_at": None,
+        "published_at": parsed.get("published_at"),
         "fetched_at": now,
         "priority": intelligence["priority"],
         "opportunity_score": intelligence["opportunity_score"],
@@ -1241,86 +1334,123 @@ def build_record(parsed):
 def main():
     print("==============================================")
     print("NIED Social Development Intelligence Collector")
-    print("Version 1.4")
+    print("Version 1.5")
+    print("Sources: NGOBox + One Purpos")
     print("==============================================")
-
-    try:
-        links = get_ngobox_links()
-
-        print(
-            f"\nListing records found: {len(links)}"
-        )
-
-    except Exception as e:
-        print(f"NGOBox listing failed: {e}")
-        return
 
     written = 0
     deadlines_found = 0
+    source_counts = {"NGOBox": 0, "One Purpos": 0}
 
-    for url in links:
+    # ========================================================
+    # SOURCE 1: NGOBOX
+    # ========================================================
+
+    try:
+        ngobox_links = get_ngobox_links()
+        print(f"\nNGOBox listing records found: {len(ngobox_links)}")
+    except Exception as e:
+        print(f"NGOBox listing failed: {e}")
+        ngobox_links = []
+
+    for url in ngobox_links:
         try:
             parsed = parse_ngobox_detail(url)
-
             if not parsed["title"]:
                 print(f"Skipped: no title found | {url}")
                 continue
 
+            parsed["source_name"] = "NGOBox"
+            parsed["source_id"] = None
+            parsed["geography"] = ["India"]
+            parsed["published_at"] = None
+
             intelligence = analyse_item(
-                parsed["title"],
-                parsed["description"],
-                parsed["organisation"],
-                parsed["deadline"],
+                parsed["title"], parsed["description"],
+                parsed["organisation"], parsed["deadline"]
             )
 
-            print(
-                f"\nParsed: {parsed['title'][:100]}"
-            )
-            print(
-                f"  Organisation: {parsed['organisation'][:80]}"
-            )
-            print(
-                f"  Type: {intelligence['opportunity_type']}"
-            )
-            print(
-                f"  Character: {intelligence['character']}"
-            )
-            print(
-                f"  Sector: {intelligence['sector']}"
-            )
+            print(f"\n[NGOBox] Parsed: {parsed['title'][:100]}")
+            print(f"  Organisation: {parsed['organisation'][:80]}")
+            print(f"  Type: {intelligence['opportunity_type']}")
+            print(f"  Character: {intelligence['character']}")
+            print(f"  Sector: {intelligence['sector']}")
+            print(f"  Deadline: {parsed['deadline'] or 'NOT FOUND'}")
+            print(f"  Strategic: {intelligence['strategic_score']}")
+            print(f"  Opportunity: {intelligence['opportunity_score']}")
+            print(f"  Urgency: {intelligence['urgency_score']}")
+            print(f"  Priority: {intelligence['priority']}")
+
             if parsed["deadline"]:
                 deadlines_found += 1
 
-            print(
-                f"  Deadline: {parsed['deadline'] or 'NOT FOUND'}"
-            )
-            print(
-                f"  Strategic: {intelligence['strategic_score']}"
-            )
-            print(
-                f"  Opportunity: {intelligence['opportunity_score']}"
-            )
-            print(
-                f"  Urgency: {intelligence['urgency_score']}"
-            )
-            print(
-                f"  Priority: {intelligence['priority']}"
-            )
-
-            record = build_record(parsed)
-
-            supabase_upsert(record)
-
+            supabase_upsert(build_record(parsed))
             written += 1
+            source_counts["NGOBox"] += 1
 
         except Exception as e:
-            print(f"Detail failed: {url}")
+            print(f"NGOBox detail failed: {url}")
             print(f"Reason: {e}")
 
+    # ========================================================
+    # SOURCE 2: ONE PURPOS
+    # ========================================================
+
+    try:
+        one_purpos_records = get_one_purpos_rfps()
+        print(f"\nOne Purpos RFP records found: {len(one_purpos_records)}")
+    except Exception as e:
+        print(f"One Purpos API failed: {e}")
+        one_purpos_records = []
+
+    one_purpos_deadlines = 0
+
+    for raw_record in one_purpos_records:
+        try:
+            parsed = parse_one_purpos_rfp(raw_record)
+            if not parsed["title"]:
+                print("Skipped One Purpos record: no title found")
+                continue
+
+            intelligence = analyse_item(
+                parsed["title"], parsed["description"],
+                parsed["organisation"], parsed["deadline"]
+            )
+
+            print(f"\n[One Purpos] Parsed: {parsed['title'][:100]}")
+            print(f"  Organisation: {parsed['organisation'][:80]}")
+            print(f"  Type: {intelligence['opportunity_type']}")
+            print(f"  Character: {intelligence['character']}")
+            print(f"  Sector: {intelligence['sector']}")
+            print(f"  Deadline: {parsed['deadline'] or 'NOT FOUND'}")
+            print(f"  Strategic: {intelligence['strategic_score']}")
+            print(f"  Opportunity: {intelligence['opportunity_score']}")
+            print(f"  Urgency: {intelligence['urgency_score']}")
+            print(f"  Priority: {intelligence['priority']}")
+
+            if parsed["deadline"]:
+                deadlines_found += 1
+                one_purpos_deadlines += 1
+
+            supabase_upsert(build_record(parsed))
+            written += 1
+            source_counts["One Purpos"] += 1
+
+        except Exception as e:
+            print(f"One Purpos record failed: {raw_record.get('rfpTitle', 'UNKNOWN')}")
+            print(f"Reason: {e}")
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
     print("\n==============================================")
+    print(f"NGOBox processed: {source_counts['NGOBox']}")
+    print(f"One Purpos processed: {source_counts['One Purpos']}")
     print(f"Supabase records written/updated: {written}")
-    print(f"Deadlines found: {deadlines_found}/{len(links)}")
-    print("Collector V1.4 completed.")
+    print(f"Deadlines found: {deadlines_found}")
+    print(f"One Purpos deadlines found: {one_purpos_deadlines}/{len(one_purpos_records)}")
+    print("Collector V1.5 completed.")
     print("==============================================")
 
 
