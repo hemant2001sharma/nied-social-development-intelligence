@@ -1100,7 +1100,7 @@ def parse_one_purpos_rfp(record):
         # Handle ISO timestamps such as 2026-09-18T18:30:00.000Z.
         if not deadline:
             iso_match = re.search(
-                r"(20\\d{2})-(\\d{1,2})-(\\d{1,2})",
+                r"(20\d{2})-(\d{1,2})-(\d{1,2})",
                 application_deadline,
             )
             if iso_match:
@@ -1334,7 +1334,7 @@ def build_record(parsed):
 def main():
     print("==============================================")
     print("NIED Social Development Intelligence Collector")
-    print("Version 1.5")
+    print("Version 1.6")
     print("Sources: NGOBox + One Purpos")
     print("==============================================")
 
@@ -1450,7 +1450,7 @@ def main():
     print(f"Supabase records written/updated: {written}")
     print(f"Deadlines found: {deadlines_found}")
     print(f"One Purpos deadlines found: {one_purpos_deadlines}/{len(one_purpos_records)}")
-    print("Collector V1.5 completed.")
+    print("Collector V1.6 completed.")
     print("==============================================")
 
 
