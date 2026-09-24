@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+/lib/
+!dashboard/lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Temporary local backup scripts
+collector_V1.4_BACKUP.py
+collector_v1.5*
+collector_v1.6_one_purpos.py
+
+# Next.js & Node
+node_modules/
+.next/
+out/
+build/
+
+# Environment files
+.env
+.env*.local
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Vercel
+.vercel
+
+# Operating System
+.DS_Store
+Thumbs.db
